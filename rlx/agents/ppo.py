@@ -1,92 +1,172 @@
-"""Proximal Policy Optimization agent implementation."""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any, Tuple
-
 import numpy as np
-import torch
-from torch import nn
+from typing import Tuple, Any
 from torch.distributions import Categorical
-
-from rlx.agents.base_agent import BaseAgent
+import torch 
+from torch import nn
+from rlx.agents.base_agent import BaseAgent, Observation, Action
 from rlx.env.manager import EnvManager
 
-
-def _to_tensor(observation: Any, device: torch.device) -> torch.Tensor:
-    """Convert an observation into a float32 tensor on the desired device."""
-    np_obs = np.asarray(observation, dtype=np.float32)
-    tensor = torch.from_numpy(np_obs).to(device)
-    if tensor.dim() == 1:
-        tensor = tensor.unsqueeze(0)
-    return tensor
-
+# --- The Agent's "Brain" ---
+# This is a separate PyTorch module. It's good practice
+# to define the network separately from the agent logic.
+#
+# This "brain" is the internal machinery. The user of our
+# library will never see or write this code. Our PPOAgent
+# will build this automatically.
 
 class ActorCritic(nn.Module):
-    """Simple shared-body actor-critic network."""
+    """
+    A simple MLP (Multi-Layer Perceptron) Actor-Critic network.
+    
+    - The "Actor" (policy) decides *what action to take*.
+      (e.g., "I'm 70% sure I should go left")
+      
+    - The "Critic" (value) *estimates the total future reward*
+      from the current state.
+      (e.g., "This state is worth about +35 future points")
+    """
 
-    def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 128) -> None:
-        super().__init__()
-        self.shared = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
+    def __init__(self,obs_shape: int, action_dim: int):
+        super(ActorCritic,self).__init__()
+
+       # --- Actor Network ---
+        self.actor_net = nn.Sequential(
+            nn.Linear(obs_shape,64),
+            nn.Tanh(64,64),
+            nn.Linear(64,64),
+            nn.Tanh(64,64),
+            nn.Linear(64,action_dim)
+        ) 
+        # --- Critic Network ---
+        self.critic_net= nn.Sequential(
+            nn.Linear(obs_shape,64),
+            nn.Tanh(64,64),
+            nn.Linear(64,64),
+            nn.Tanh(64,64),
+            nn.Linear(64,1) #our critic only outputs 1 value, the estimated total future reward
         )
-        self.actor_head = nn.Linear(hidden_dim, action_dim)
-        self.critic_head = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = self.shared(x)
-        logits = self.actor_head(x)
-        value = self.critic_head(x)
-        return logits, value.squeeze(-1)
+    def get_action(self, obs: torch.Tensor )->Categorical:
+          """Gets the action distribution from the actor network."""
+          # The actor network returns "logits".
+          logits = self.actor_net(obs)
+          return Categorical(logits=logits)
 
+    def get_value(self, obs: torch.Tensor) -> torch.Tensor:
+          """Gets the estimated state-value from the critic network."""
+          return self.critic_net(obs)
 
+# --- The PPO Agent Class ---
 class PPOAgent(BaseAgent):
-    """First concrete implementation that satisfies :class:`BaseAgent`."""
+   
+   def __init__(self,env: EnvManager, lr: float= 3e-4):
+      """
+        Initializes the PPO Agent.
+        
+        ---
+        [DEV_NOTE] How a user will call this function:
+        
+        env = Env("CartPole-v1")
+        
+        # This __init__ method is called here:
+        agent = Agent("ppo", env=env, lr=0.0003)
+        ---
+        """
+      super().__init__()
+      
+      self.env = env
+      self.lr = lr
+      
 
-    def __init__(
-        self,
-        env: EnvManager,
-        lr: float = 3e-4,
-        gamma: float = 0.99,
-        clip_ratio: float = 0.2,
-    ) -> None:
-        super().__init__()
-        self.env = env
-        obs_shape = env.observation_space.shape
-        if obs_shape is None:
-            raise ValueError("Observation space must define a shape.")
-        self.obs_dim = int(np.prod(obs_shape))
-        self.action_dim = env.action_space.n
+      # --- KEY LINES ---
+        # Here is where we "read the dashboard" of the env.
+        # This is why the 'env' object is required.
+      obs_shape =env.observation_space.shape[0]
+      action_dim=env.action_space.n
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.ac_network = ActorCritic(self.obs_dim, self.action_dim).to(self.device)
-        self.optimizer = torch.optim.Adam(self.ac_network.parameters(), lr=lr)
-        self.gamma = gamma
-        self.clip_ratio = clip_ratio
+      # Create the "brain": this is the brian of PP=
+      self.ac_network=ActorCritic(obs_shape,action_dim)
 
-    def select_action(self, observation: Any) -> Tuple[int, float]:
-        """Sample an action and return its log-probability."""
-        obs_tensor = _to_tensor(observation, self.device)
+      # Create the optimizer
+      # This will update the network's weights during .learn(), using the learning rate lr identfied with the PPOAgent
+      self.optimezer = torch.optim.Adam(self.ac_network.parameters(),lr=self.lr)
+      print(f"✅ [PPOAgent] Initialized.")
+      print(f"  - Obs Shape: {obs_shape}, Action Dim: {action_dim}")
+      print(f"  - Learning Rate: {self.lr}")
+      
+      
+   def select_action(self, observation:Observation)-> Tuple[Action,any]:
+         """
+        Selects an action based on the current observation.
+        
+        This implements the "contract" from BaseAgent.
+        
+        ---
+        [DEV_NOTE] How this function will be called (by the Trainer):
+        
+        # Inside the Trainer's 'run' loop:
+        # 'obs' will be a single numpy array (e.g., [0.1, -0.2, 0.0, 0.3])
+        action, log_prob = self.agent.select_action(obs)
+        ---
+        """
+        # 1. Convert data: numpy -> torch.Tensor
+        # We also add a "batch dimension" (unsqueeze(0)) because
+        # PyTorch networks expect batches, not single samples.
+        # [4] -> [1, 4]
+        # (We will implement this logic in the next step)
+         obs_tensor = torch.tensor(observation,dtype=torch.float32).unsqueeze(0)#Add a batch dimension → shape becomes (1, obs_dim).
+         
+         # Put the network in "evaluation" mode (disables dropout, etc.)
+        # and tell PyTorch not to calculate gradients here. 
+        #We are not learning so calculating gradient takes a lot of VRam
+         self.ac_network.eval()
+         with torch.no_grad():
+            
+            # 2. Think (Act): Get the "loaded dice"
+            action_dist = self.ac_network.get_action(obs_tensor)
 
-        with torch.no_grad():
-            logits, _ = self.ac_network(obs_tensor)
-            dist = Categorical(logits=logits)
-            action = dist.sample()
-            log_prob = dist.log_prob(action)
+            # 3. Think (Criticize): Get the "fortune-teller's" prediction
+            state_value = self.ac_network.get_value(obs_tensor)
 
-        return int(action.squeeze(0).cpu().item()), float(log_prob.squeeze(0).cpu().item())
+            # 4. Act (Sample): "Roll the dice" to get an action
+            action = action_dist.sample()
+            # 5. Get Log-Prob: Ask the dice "what was the log-probability
+        #    of the action we just sampled?" We need this for the
+        #    'learn' method.
+            log_prob = action_dist.log_prob(action)
+            # 6. Return action and extra data
+        # We use .item() to convert the single-item PyTorch tensors
+        # back into plain Python numbers for the env.
+        #
+        # We return a tuple: (action, (log_prob, value))
+        # The 'Trainer' will be responsible for storing this "extra data".
+         extras = (log_prob.item(), state_value.item())
+        
+         return action.item(), extras
+      
 
-    def learn(self, *args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError("PPOAgent.learn is not implemented yet.")
 
-    def save(self, path: str) -> None:
-        torch.save(self.ac_network.state_dict(), path)
+        
+   def learn(self, *args, **kwargs) -> dict:
+        #[Dev Note]: understand args and kwargs when you work later on this
+        """
+        Triggers the agent to update its policy.
+        
+        This implements the "contract" from BaseAgent.
+        """
+        # (This is where the complex PPO logic will go)
+        raise NotImplementedError
+      
+   def save(self,path:str)->None:
+         """Saves the agent's model weights to a file."""
+         # PyTorch models are saved using 'state_dict'
+         torch.save(self.ac_network.state_dict(), path)
+         print(f"✅ [PPOAgent] Model saved to {path}")
 
-    def load(self, path: str) -> None:
-        state = torch.load(path, map_location=self.device)
-        self.ac_network.load_state_dict(state)
+   def load(self, path:str)->None:
+        """Loads the agent's model weights from a file."""
+        # We load the weights into the network
+        self.ac_network.load_state_dict(torch.load(path))
+        print(f"✅ [PPOAgent] Model loaded from {path}")
+         
 
