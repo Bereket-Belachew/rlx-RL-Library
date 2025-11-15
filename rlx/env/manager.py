@@ -93,9 +93,9 @@ class EnvManager:
     @property
     def observation_space(self) -> gym.Space:
         """ returns The Gymnasium observation stored in self.gym """
-        return self.gym.observation_space
+        return self.env.observation_space
     
     @property
     def action_space(self)-> gym.Space:
         """ returns Gymnasium action action space stored in self.gym """
-        return self.gym.action_space
+        return self.env.action_space

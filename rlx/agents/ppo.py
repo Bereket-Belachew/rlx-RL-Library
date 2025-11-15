@@ -5,6 +5,7 @@ import torch
 from torch import nn
 from rlx.agents.base_agent import BaseAgent, Observation, Action
 from rlx.env.manager import EnvManager
+from rlx.utils.buffer import RolloutBuffer
 
 # --- The Agent's "Brain" ---
 # This is a separate PyTorch module. It's good practice
@@ -32,17 +33,17 @@ class ActorCritic(nn.Module):
        # --- Actor Network ---
         self.actor_net = nn.Sequential(
             nn.Linear(obs_shape,64),
-            nn.Tanh(64,64),
+            nn.Tanh(),
             nn.Linear(64,64),
-            nn.Tanh(64,64),
+            nn.Tanh(),
             nn.Linear(64,action_dim)
         ) 
         # --- Critic Network ---
         self.critic_net= nn.Sequential(
             nn.Linear(obs_shape,64),
-            nn.Tanh(64,64),
+            nn.Tanh(),
             nn.Linear(64,64),
-            nn.Tanh(64,64),
+            nn.Tanh(),
             nn.Linear(64,1) #our critic only outputs 1 value, the estimated total future reward
         )
 
@@ -59,7 +60,14 @@ class ActorCritic(nn.Module):
 # --- The PPO Agent Class ---
 class PPOAgent(BaseAgent):
    
-   def __init__(self,env: EnvManager, lr: float= 3e-4):
+   def __init__(self,env: EnvManager, lr: float= 3e-4,
+                n_steps:int=2048,
+                gamma:float=0.99,
+                gae_lambda:float=0.95,
+                n_epochs:int =10,
+                clip_coef:float=0.2,
+                entropy_coef:float=0.0,
+                value_coef:float=0.5):
       """
         Initializes the PPO Agent.
         
@@ -76,22 +84,41 @@ class PPOAgent(BaseAgent):
       
       self.env = env
       self.lr = lr
+      self.n_steps = n_steps
+      self.gamma = gamma
+      self.gae_lambda = gae_lambda
+      self.n_epochs = n_epochs
+      self.clip_coef = clip_coef
+      self.entropy_coef = entropy_coef
+      self.value_coef = value_coef
       
 
       # --- KEY LINES ---
         # Here is where we "read the dashboard" of the env.
         # This is why the 'env' object is required.
-      obs_shape =env.observation_space.shape[0]
+      #[FIX] Get the tuple (e.g., (4,)) for the self.buffer
+      obs_shape_tuple = env.observation_space.shape
+      #obs_shape_int for actor critic, this take int, the buffer takes tuple version of observation
+      obs_shape_int =env.observation_space.shape[0]
       action_dim=env.action_space.n
 
       # Create the "brain": this is the brian of PP=
-      self.ac_network=ActorCritic(obs_shape,action_dim)
+      
+      self.ac_network=ActorCritic(obs_shape_int,action_dim)
 
       # Create the optimizer
       # This will update the network's weights during .learn(), using the learning rate lr identfied with the PPOAgent
       self.optimezer = torch.optim.Adam(self.ac_network.parameters(),lr=self.lr)
+
+        # [NEW] Build the Buffer
+        # The Agent will "own" its buffer, which is a cleaner
+        # design than the Trainer owning it.
+
+      #passed obs_shaped_tuple to buffer
+      self.buffer = RolloutBuffer(n_steps,obs_shape_tuple,action_dim)
+
       print(f"✅ [PPOAgent] Initialized.")
-      print(f"  - Obs Shape: {obs_shape}, Action Dim: {action_dim}")
+      print(f"  - Obs Shape: {obs_shape_int}, Action Dim: {action_dim}")
       print(f"  - Learning Rate: {self.lr}")
       
       
@@ -145,28 +172,102 @@ class PPOAgent(BaseAgent):
          return action.item(), extras
       
 
-
-        
-   def learn(self, *args, **kwargs) -> dict:
-        #[Dev Note]: understand args and kwargs when you work later on this
-        """
-        Triggers the agent to update its policy.
-        
-        This implements the "contract" from BaseAgent.
-        """
-        # (This is where the complex PPO logic will go)
-        raise NotImplementedError
-      
    def save(self,path:str)->None:
          """Saves the agent's model weights to a file."""
          # PyTorch models are saved using 'state_dict'
          torch.save(self.ac_network.state_dict(), path)
-         print(f"✅ [PPOAgent] Model saved to {path}")
+         print(f"✅ [PPOAgent] Model saved to {path}")  
+
 
    def load(self, path:str)->None:
         """Loads the agent's model weights from a file."""
         # We load the weights into the network
         self.ac_network.load_state_dict(torch.load(path))
         print(f"✅ [PPOAgent] Model loaded from {path}")
+      
+   def learn(self, batch:dict[str,torch.Tensor]) -> dict:
+        #[Dev Note]: understand args and kwargs when you work later on this
+        """
+        Triggers the agent to update its policy.
+        
+        This implements the "contract" from BaseAgent.
+        """
+       
+        # 1. Get the pre-calculated advantages and returns
+        obs=batch['observations']
+        actions = batch['actions']
+        old_log_probs = batch['log_probs']
+        advantages =batch['advantages']
+        returns = batch['returns']
+
+        # 2. Normalize advantages (a standard PPO trick for stability)
+        advantages = (advantages- advantages.mean())/(advantages.std()+ 1e-8)
+        # 3. Put network in "training" mode
+        self.ac_network.train()
+
+        # 4. The PPO Update Loop
+        # We loop over the *same* batch of data multiple times
+        for _ in range (self.n_epochs):
+             
+             # --- Re-evaluate the batch data ---
+            # Get *new* log_probs, values, and entropy from the
+            # "brain" (which is being updated every loop)
+
+            action_dist = self.ac_network.get_action(obs)
+            new_values= self.ac_network.get_value(obs)
+            new_log_probs = action_dist.log_prob(actions)
+            entropy = action_dist.entropy()
+
+            # --- Calculate the Actor (Policy) Loss ---
+            
+            # The "ratio": pi_new / pi_old
+            # In log-space, this is exp(log_pi_new - log_pi_old)
+
+            log_ratio = new_log_probs- old_log_probs
+            ratio = torch.exp(log_ratio)
+
+            # The "clipped" surrogate objective
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio,1-self.clip_coef,1+self.clip_coef)* advantages
+
+            # PPO loss is the *minimum* of these two, averaged
+            # We take the negative because optimizers minimize
+            actor_loss = -torch.min(surr1,surr2).mean()
+            
+            # --- Calculate the Critic (Value) Loss ---
+            # This is a simple Mean Squared Error (MSE)
+            # (predicted_value - actual_return)^2
+            value_loss = (new_values - returns).pow(2).mean()
+
+            # --- Calculate the Entropy Loss ---
+            # We want to *maximize* entropy (encourage exploration)
+            # so we take the *negative* mean and add it to the loss.
+            entropy_loss = -entropy.mean()
+
+            # --- The Final, Combined Loss ---
+            loss = (
+                 actor_loss
+                 +(self.value_coef*value_loss)
+                 +(self.entropy_coef*entropy_loss)
+            )
+            # --- Backpropagation (The "Hiker" Analogy) ---
+            
+            # 1. Clear old gradients (wipe the "slope" info)
+            self.optimezer.zero_grad()
+
+            # 2. Calculate new gradients (stomp foot, find slope)
+            loss.backward()
+
+            # 3. Take a step downhill
+            self.optimezer.step()
+
+        return{
+             "total_loss":loss.item(),
+             "actor_loss":actor_loss.item(),
+             "value_loss":value_loss.item()
+        }
+
+  
+  
          
 

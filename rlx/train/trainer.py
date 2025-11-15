@@ -1,5 +1,6 @@
 from rlx.env.manager import EnvManager 
 from rlx.agents.base_agent import BaseAgent
+import torch 
 
 # [NEW IMPORT]
 # We now import our RolloutBuffer. The Trainer
@@ -8,7 +9,7 @@ from rlx.utils.buffer import RolloutBuffer
 import gymnasium as gym
 
 class Train:
-    def __init__(self, agent:BaseAgent, env:EnvManager,n_steps: int=2048):
+    def __init__(self, agent:BaseAgent, env:EnvManager):
 
         """
         Initializes the Trainer.
@@ -21,7 +22,7 @@ class Train:
         """
         self.agent= agent
         self.env=env
-        self.n_steps = n_steps
+        
 
 
         # [NEW] Create the "shopping cart" (RolloutBuffer)
@@ -34,7 +35,7 @@ class Train:
         else:
             raise NotImplementedError("Only Discrete action spaces are supported for now.")
         
-        self.buffer = RolloutBuffer(self.n_step,obs_shape,action_dim)
+        ## [REMOVED] The buffer is now owned by the agent: self.buffer = RolloutBuffer(self.n_steps,obs_shape,action_dim)
 
     def run(self,total_time_steps:int):
 
@@ -66,21 +67,28 @@ class Train:
             done=terminated or truncated #game is either over either way
 
             # 3. Add to "shopping cart" (Buffer)
-            self.buffer.add(obs,action,reward,value,log_prob,done)
+            self.agent.buffer.add(obs,action,reward,value,log_prob,done)
 
             # 4. Check if the cart is full
-            if self.buffer.is_full():
-                # [DEV_NOTE] This is the "checkout"
-                # This line will FAIL until we implement PPOAgent.learn()
-                #
-                # We get the batch from the buffer...
+            if self.agent.buffer.is_full():
+                # --- This is the "Checkout" ---
+                
+                # [NEW] Get the "last_value" for GAE
+                # We need to get the "fortune-teller's" prediction
+                # for the *next* state we are about to see
+                next_obs_tensor = torch.tensor(next_obs,dtype=torch.float32).unsqueeze(0)
+                self.agent.ac_network.eval()
+                with torch.no_grad():
+                    last_value = self.agent.ac_network.get_value(next_obs_tensor).item()
 
-                batch = self.buffer.get_batch()
+                # [NEW] We pass this last_value to the buffer
+                # so it can calculate GAE
+                batch = self.agent.buffer.get_batch(last_value,self.agent.gamma,self.agent.gae_lambda)
 
                 # ...and tell the agent to learn from it
                 self.agent.learn(batch)
 
-                self.buffer.clear()
+                self.agent.buffer.clear()
             obs=next_obs
             if done:
                 obs,info = self.env.reset()
