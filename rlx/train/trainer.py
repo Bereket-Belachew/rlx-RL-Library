@@ -1,6 +1,7 @@
 from rlx.env.manager import EnvManager 
 from rlx.agents.base_agent import BaseAgent
 import torch 
+import numpy as np # [NEW] Needed for calculating mean reward
 
 # [NEW IMPORT]
 # We now import our RolloutBuffer. The Trainer
@@ -55,7 +56,11 @@ class Train:
         obs,info = self.env.reset()
         
 
-        for step in range(total_time_steps):
+        current_step= 0
+        # [LOGGING] Track rewards
+        current_episode_reward = 0.0
+        episode_reward = []
+        while current_step< total_time_steps:
 
             # 1. Ask Agent what to do
             #    Our PPOAgent.select_action() returns (action, (log_prob, value))
@@ -65,6 +70,9 @@ class Train:
             # 2. Take action in Environment
             next_obs,reward,terminated,truncated,info = self.env.step(action)
             done=terminated or truncated #game is either over either way
+
+            # [LOGGING] Update reward tracker
+            current_episode_reward += reward
 
             # 3. Add to "shopping cart" (Buffer)
             self.agent.buffer.add(obs,action,reward,value,log_prob,done)
@@ -85,12 +93,23 @@ class Train:
                 # so it can calculate GAE
                 batch = self.agent.buffer.get_batch(last_value,self.agent.gamma,self.agent.gae_lambda)
 
-                # ...and tell the agent to learn from it
-                self.agent.learn(batch)
+                # [LOGGING] Capture the metrics returned by learn()
+                metrics = self.agent.learn(batch)
 
                 self.agent.buffer.clear()
+
+                # [LOGGING] Print Dashboard
+                if len(episode_reward) > 0:
+                    # Average of last 10 episodes
+                    mean_rew  = np.mean(episode_reward[-10:])
+                    print(f"{current_step:<10} | {mean_rew:<12.1f} | {metrics['actor_loss']:<10.4f} | {metrics['value_loss']:<10.4f}")
+                    
             obs=next_obs
+            current_step+=1
             if done:
+                # [LOGGING] Save episode reward
+                episode_reward.append(current_episode_reward)
+                current_episode_reward= 0.0
                 obs,info = self.env.reset()
         print("✅ [Trainer] Training complete.")
         self.env.close()

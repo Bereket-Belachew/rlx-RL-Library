@@ -1,85 +1,29 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim # [FIX] Added optim import
 import numpy as np
 from typing import Tuple, Any
-from torch.distributions import Categorical
-import torch 
-from torch import nn
+
 from rlx.agents.base_agent import BaseAgent, Observation, Action
 from rlx.env.manager import EnvManager
 from rlx.utils.buffer import RolloutBuffer
 
-# --- The Agent's "Brain" ---
-# This is a separate PyTorch module. It's good practice
-# to define the network separately from the agent logic.
-#
-# This "brain" is the internal machinery. The user of our
-# library will never see or write this code. Our PPOAgent
-# will build this automatically.
+# [NEW] Import the brain from our new module
+from rlx.networks.core import ActorCritic
 
-class ActorCritic(nn.Module):
-    """
-    A simple MLP (Multi-Layer Perceptron) Actor-Critic network.
-    
-    - The "Actor" (policy) decides *what action to take*.
-      (e.g., "I'm 70% sure I should go left")
-      
-    - The "Critic" (value) *estimates the total future reward*
-      from the current state.
-      (e.g., "This state is worth about +35 future points")
-    """
-
-    def __init__(self,obs_shape: int, action_dim: int):
-        super(ActorCritic,self).__init__()
-
-       # --- Actor Network ---
-        self.actor_net = nn.Sequential(
-            nn.Linear(obs_shape,64),
-            nn.Tanh(),
-            nn.Linear(64,64),
-            nn.Tanh(),
-            nn.Linear(64,action_dim)
-        ) 
-        # --- Critic Network ---
-        self.critic_net= nn.Sequential(
-            nn.Linear(obs_shape,64),
-            nn.Tanh(),
-            nn.Linear(64,64),
-            nn.Tanh(),
-            nn.Linear(64,1) #our critic only outputs 1 value, the estimated total future reward
-        )
-
-    def get_action(self, obs: torch.Tensor )->Categorical:
-          """Gets the action distribution from the actor network."""
-          # The actor network returns "logits".
-          logits = self.actor_net(obs)
-          return Categorical(logits=logits)
-
-    def get_value(self, obs: torch.Tensor) -> torch.Tensor:
-          """Gets the estimated state-value from the critic network."""
-          return self.critic_net(obs)
-
-# --- The PPO Agent Class ---
 class PPOAgent(BaseAgent):
    
-   def __init__(self,env: EnvManager, lr: float= 3e-4,
-                n_steps:int=2048,
-                gamma:float=0.99,
-                gae_lambda:float=0.95,
-                n_epochs:int =10,
-                clip_coef:float=0.2,
-                entropy_coef:float=0.0,
-                value_coef:float=0.5):
-      """
-        Initializes the PPO Agent.
-        
-        ---
-        [DEV_NOTE] How a user will call this function:
-        
-        env = Env("CartPole-v1")
-        
-        # This __init__ method is called here:
-        agent = Agent("ppo", env=env, lr=0.0003)
-        ---
-        """
+   def __init__(self, env: EnvManager, 
+                policy: torch.nn.Module = None, # [NEW] Allow user to pass a brain
+                lr: float = 3e-4,
+                n_steps: int = 2048,
+                gamma: float = 0.99,
+                gae_lambda: float = 0.95,
+                n_epochs: int = 10,
+                clip_coef: float = 0.2,
+                entropy_coef: float = 0.0,
+                value_coef: float = 0.5):
+      
       super().__init__()
       
       self.env = env
@@ -92,182 +36,133 @@ class PPOAgent(BaseAgent):
       self.entropy_coef = entropy_coef
       self.value_coef = value_coef
       
-
       # --- KEY LINES ---
-        # Here is where we "read the dashboard" of the env.
-        # This is why the 'env' object is required.
-      #[FIX] Get the tuple (e.g., (4,)) for the self.buffer
+      # [FIX] Get the tuple (e.g., (4,)) for the self.buffer
       obs_shape_tuple = env.observation_space.shape
-      #obs_shape_int for actor critic, this take int, the buffer takes tuple version of observation
-      obs_shape_int =env.observation_space.shape[0]
-      action_dim=env.action_space.n
+      # obs_shape_int for actor critic default
+      obs_shape_int = env.observation_space.shape[0]
+      action_dim = env.action_space.n
 
-      # Create the "brain": this is the brian of PP=
+      # [NEW LOGIC] Plug-and-Play Brain
+      if policy is not None:
+          print(f"🧠 [PPOAgent] Using custom policy provided by user.")
+          self.ac_network = policy
+      else:
+          print(f"🧠 [PPOAgent] Using default ActorCritic policy.")
+          self.ac_network = ActorCritic(obs_shape_int, action_dim)
       
-      self.ac_network=ActorCritic(obs_shape_int,action_dim)
-
       # Create the optimizer
-      # This will update the network's weights during .learn(), using the learning rate lr identfied with the PPOAgent
-      self.optimezer = torch.optim.Adam(self.ac_network.parameters(),lr=self.lr)
+      # [FIX] Spelled 'optimizer' correctly
+      self.optimizer = torch.optim.Adam(self.ac_network.parameters(), lr=self.lr)
 
-        # [NEW] Build the Buffer
-        # The Agent will "own" its buffer, which is a cleaner
-        # design than the Trainer owning it.
-
-      #passed obs_shaped_tuple to buffer
-      self.buffer = RolloutBuffer(n_steps,obs_shape_tuple,action_dim)
+      # [NEW] Build the Buffer
+      self.buffer = RolloutBuffer(n_steps, obs_shape_tuple, action_dim)
 
       print(f"✅ [PPOAgent] Initialized.")
       print(f"  - Obs Shape: {obs_shape_int}, Action Dim: {action_dim}")
       print(f"  - Learning Rate: {self.lr}")
       
       
-   def select_action(self, observation:Observation)-> Tuple[Action,any]:
-         """
-        Selects an action based on the current observation.
-        
-        This implements the "contract" from BaseAgent.
-        
-        ---
-        [DEV_NOTE] How this function will be called (by the Trainer):
-        
-        # Inside the Trainer's 'run' loop:
-        # 'obs' will be a single numpy array (e.g., [0.1, -0.2, 0.0, 0.3])
-        action, log_prob = self.agent.select_action(obs)
-        ---
-        """
-        # 1. Convert data: numpy -> torch.Tensor
-        # We also add a "batch dimension" (unsqueeze(0)) because
-        # PyTorch networks expect batches, not single samples.
-        # [4] -> [1, 4]
-        # (We will implement this logic in the next step)
-         obs_tensor = torch.tensor(observation,dtype=torch.float32).unsqueeze(0)#Add a batch dimension → shape becomes (1, obs_dim).
+   def select_action(self, observation: Observation) -> Tuple[Action, any]:
+         # 1. Convert data: numpy -> torch.Tensor
+         obs_tensor = torch.tensor(observation, dtype=torch.float32).unsqueeze(0)
          
-         # Put the network in "evaluation" mode (disables dropout, etc.)
-        # and tell PyTorch not to calculate gradients here. 
-        #We are not learning so calculating gradient takes a lot of VRam
+         # Put network in eval mode
          self.ac_network.eval()
          with torch.no_grad():
             
-            # 2. Think (Act): Get the "loaded dice"
+            # 2. Think (Act)
             action_dist = self.ac_network.get_action(obs_tensor)
 
-            # 3. Think (Criticize): Get the "fortune-teller's" prediction
+            # 3. Think (Criticize)
             state_value = self.ac_network.get_value(obs_tensor)
 
-            # 4. Act (Sample): "Roll the dice" to get an action
+            # 4. Act (Sample)
             action = action_dist.sample()
-            # 5. Get Log-Prob: Ask the dice "what was the log-probability
-        #    of the action we just sampled?" We need this for the
-        #    'learn' method.
+            
+            # 5. Get Log-Prob
             log_prob = action_dist.log_prob(action)
-            # 6. Return action and extra data
-        # We use .item() to convert the single-item PyTorch tensors
-        # back into plain Python numbers for the env.
-        #
-        # We return a tuple: (action, (log_prob, value))
-        # The 'Trainer' will be responsible for storing this "extra data".
+            
          extras = (log_prob.item(), state_value.item())
-        
          return action.item(), extras
       
 
-   def save(self,path:str)->None:
-         """Saves the agent's model weights to a file."""
-         # PyTorch models are saved using 'state_dict'
+   def save(self, path: str) -> None:
          torch.save(self.ac_network.state_dict(), path)
          print(f"✅ [PPOAgent] Model saved to {path}")  
 
-
-   def load(self, path:str)->None:
-        """Loads the agent's model weights from a file."""
-        # We load the weights into the network
+   def load(self, path: str) -> None:
         self.ac_network.load_state_dict(torch.load(path))
         print(f"✅ [PPOAgent] Model loaded from {path}")
       
-   def learn(self, batch:dict[str,torch.Tensor]) -> dict:
-        #[Dev Note]: understand args and kwargs when you work later on this
-        """
-        Triggers the agent to update its policy.
+   def learn(self, batch: dict[str, torch.Tensor]) -> dict:
         
-        This implements the "contract" from BaseAgent.
-        """
-       
         # 1. Get the pre-calculated advantages and returns
-        obs=batch['observations']
+        obs = batch['observations']
         actions = batch['actions']
         old_log_probs = batch['log_probs']
-        advantages =batch['advantages']
+        advantages = batch['advantages']
         returns = batch['returns']
 
-        # 2. Normalize advantages (a standard PPO trick for stability)
-        advantages = (advantages- advantages.mean())/(advantages.std()+ 1e-8)
+        # 2. Normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
         # 3. Put network in "training" mode
         self.ac_network.train()
 
-        # 4. The PPO Update Loop
-        # We loop over the *same* batch of data multiple times
-        for _ in range (self.n_epochs):
-             
-             # --- Re-evaluate the batch data ---
-            # Get *new* log_probs, values, and entropy from the
-            # "brain" (which is being updated every loop)
+        # [LOGGING] Initialize accumulators for average loss
+        total_loss_accum = 0.0
+        actor_loss_accum = 0.0
+        value_loss_accum = 0.0
 
+
+        # 4. The PPO Update Loop
+        for _ in range(self.n_epochs):
+             
             action_dist = self.ac_network.get_action(obs)
-            new_values= self.ac_network.get_value(obs)
+            
+            # [FIX] Added .squeeze() to handle shape mismatch [Batch, 1] -> [Batch]
+            new_values = self.ac_network.get_value(obs).squeeze()
+            
             new_log_probs = action_dist.log_prob(actions)
             entropy = action_dist.entropy()
 
-            # --- Calculate the Actor (Policy) Loss ---
-            
-            # The "ratio": pi_new / pi_old
-            # In log-space, this is exp(log_pi_new - log_pi_old)
-
-            log_ratio = new_log_probs- old_log_probs
+            # --- Calculate Actor Loss ---
+            log_ratio = new_log_probs - old_log_probs
             ratio = torch.exp(log_ratio)
 
-            # The "clipped" surrogate objective
             surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio,1-self.clip_coef,1+self.clip_coef)* advantages
+            surr2 = torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef) * advantages
 
-            # PPO loss is the *minimum* of these two, averaged
-            # We take the negative because optimizers minimize
-            actor_loss = -torch.min(surr1,surr2).mean()
+            actor_loss = -torch.min(surr1, surr2).mean()
             
-            # --- Calculate the Critic (Value) Loss ---
-            # This is a simple Mean Squared Error (MSE)
-            # (predicted_value - actual_return)^2
+            # --- Calculate Critic Loss ---
             value_loss = (new_values - returns).pow(2).mean()
 
-            # --- Calculate the Entropy Loss ---
-            # We want to *maximize* entropy (encourage exploration)
-            # so we take the *negative* mean and add it to the loss.
+            # --- Calculate Entropy Loss ---
             entropy_loss = -entropy.mean()
 
-            # --- The Final, Combined Loss ---
+
+            # --- Final Loss ---
             loss = (
                  actor_loss
-                 +(self.value_coef*value_loss)
-                 +(self.entropy_coef*entropy_loss)
+                 + (self.value_coef * value_loss)
+                 + (self.entropy_coef * entropy_loss)
             )
-            # --- Backpropagation (The "Hiker" Analogy) ---
             
-            # 1. Clear old gradients (wipe the "slope" info)
-            self.optimezer.zero_grad()
-
-            # 2. Calculate new gradients (stomp foot, find slope)
+            # --- Backpropagation ---
+            # [FIX] Spelled 'optimizer' correctly
+            self.optimizer.zero_grad()
             loss.backward()
+            self.optimizer.step()
 
-            # 3. Take a step downhill
-            self.optimezer.step()
-
-        return{
-             "total_loss":loss.item(),
-             "actor_loss":actor_loss.item(),
-             "value_loss":value_loss.item()
+            # [LOGGING] Add to accumulators
+            total_loss_accum += loss.item()
+            actor_loss_accum += actor_loss.item()
+            value_loss_accum += value_loss.item()
+            n = self.n_steps
+        return {
+             "total_loss": total_loss_accum/ n,
+             "actor_loss": actor_loss_accum/n,
+             "value_loss": value_loss_accum/n
         }
-
-  
-  
-         
-
