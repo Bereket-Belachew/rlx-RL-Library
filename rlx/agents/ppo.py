@@ -8,8 +8,10 @@ from rlx.agents.base_agent import BaseAgent, Observation, Action
 from rlx.env.manager import EnvManager
 from rlx.utils.buffer import RolloutBuffer
 
-# [NEW] Import the brain from our new module
-from rlx.networks.core import ActorCritic
+# [NEW] Import the brain from our new module, and now include Continuous Actor Critic
+from rlx.networks.core import ActorCritic,ContinuousActorCritic
+import gymnasium as gym #[New] used for contiuous actor critic 
+
 
 class PPOAgent(BaseAgent):
    
@@ -41,22 +43,37 @@ class PPOAgent(BaseAgent):
       obs_shape_tuple = env.observation_space.shape
       # obs_shape_int for actor critic default
       obs_shape_int = env.observation_space.shape[0]
-      action_dim = env.action_space.n
+
+      # [NEW LOGIC] Detect Action Space Type
+      # This is the Universal Adaptor logic
+      if isinstance(env.action_space,gym.spaces.Discrete):
+          print(f"🤖 [PPOAgent] Detected DISCRETE action space.")
+          self.is_continuous = False
+          action_dim = env.action_space.n
+          DefaultPolicy = ActorCritic
+      elif isinstance(env.action_space, gym.spaces.Box):
+          print(f"🤖 [PPOAgent] Detected CONTINUOUS action space.")
+          self.is_continuous=True 
+          action_dim=env.action_space.shape[0]
+          DefaultPolicy = ContinuousActorCritic
+      else: 
+          raise NotImplementedError(f"Action space {env.action_space} not supported yet!")
+           
 
       # [NEW LOGIC] Plug-and-Play Brain
       if policy is not None:
           print(f"🧠 [PPOAgent] Using custom policy provided by user.")
           self.ac_network = policy
       else:
-          print(f"🧠 [PPOAgent] Using default ActorCritic policy.")
-          self.ac_network = ActorCritic(obs_shape_int, action_dim)
+          print(f"🧠 [PPOAgent] Using default policy.")
+          self.ac_network = DefaultPolicy(obs_shape_int, action_dim)
       
       # Create the optimizer
       # [FIX] Spelled 'optimizer' correctly
       self.optimizer = torch.optim.Adam(self.ac_network.parameters(), lr=self.lr)
 
-      # [NEW] Build the Buffer
-      self.buffer = RolloutBuffer(n_steps, obs_shape_tuple, action_dim)
+      # [NEW] Build the Buffer with the is_continuous flag
+      self.buffer = RolloutBuffer(n_steps, obs_shape_tuple, action_dim,self.is_continuous)
 
       print(f"✅ [PPOAgent] Initialized.")
       print(f"  - Obs Shape: {obs_shape_int}, Action Dim: {action_dim}")
@@ -83,8 +100,20 @@ class PPOAgent(BaseAgent):
             # 5. Get Log-Prob
             log_prob = action_dist.log_prob(action)
             
+         if self.is_continuous:
+             # Continuous: Sum log_probs across dimensions (standard practice)
+             # If action is [0.5, -0.2], log_prob is [lp1, lp2]. Total prob is sum.
+             if log_prob.dim() > 1:
+                 log_prob = log_prob.sum(dim=-1)
+
+
+             action_out = action.cpu().numpy()[0]
+         else:
+             # Discrete: Return scalar int
+             action_out = action.item()
+                 
          extras = (log_prob.item(), state_value.item())
-         return action.item(), extras
+         return action_out, extras
       
 
    def save(self, path: str) -> None:
@@ -126,6 +155,16 @@ class PPOAgent(BaseAgent):
             
             new_log_probs = action_dist.log_prob(actions)
             entropy = action_dist.entropy()
+
+            # [NEW] Continuous Space Fix:
+            # If we have multiple action dimensions (e.g. Car Racing),
+            # we sum the log_probs and entropy across the action dimension.
+            if self.is_continuous:
+                
+                if new_log_probs.dim()>1:
+                    new_log_probs = new_log_probs.sum(dim=-1)
+                if entropy.dim()>1:
+                    entropy= entropy.sum(dim=-1)
 
             # --- Calculate Actor Loss ---
             log_ratio = new_log_probs - old_log_probs

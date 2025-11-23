@@ -4,7 +4,7 @@ import torch
 
 class RolloutBuffer:
 
-    def __init__(self,n_steps:int,obs_shape:tuple,action_dim:int):
+    def __init__(self,n_steps:int,obs_shape:tuple,action_dim:int,is_continuous:bool = False):
         """
         Initializes the buffer.
         
@@ -18,11 +18,25 @@ class RolloutBuffer:
         self.n_steps=n_steps
         self.obs_shape = obs_shape
         self.action_dim = action_dim
+        self.is_continuous = is_continuous # for continuous action space
 
         # We use 'np.zeros' to pre-allocate all the memory
         # we'll need. This is much more efficient than appending.
         self.observations = np.zeros((self.n_steps,)+self.obs_shape, dtype=np.float32)
-        self.actions= np.zeros((self.n_steps,),dtype=np.int64)
+
+        #[NEW LOGIC] Handle Action Storage
+        if self.is_continuous:
+            # Continuous: Store as floats with shape (N, action_dim)
+            # Example: Driving a car [Steer, Gas, Brake] -> Shape (2048, 3)
+            self.actions= np.zeros((self.n_steps,self.action_dim),dtype=np.float32)
+        else:
+            # Discrete: Store as floats (safe for ints too) with shape (N,)
+            # Example: CartPole [Left/Right] -> Shape (2048,)
+            self.actions= np.zeros((self.n_steps,),dtype=np.float32)
+
+
+
+        
         self.rewards= np.zeros((self.n_steps,),dtype=np.float32)
         self.values= np.zeros((self.n_steps,),dtype=np.float32)
         self.log_probs= np.zeros((self.n_steps,),dtype=np.float32)

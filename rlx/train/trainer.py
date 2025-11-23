@@ -23,18 +23,11 @@ class Train:
         """
         self.agent= agent
         self.env=env
+        print("✅ [Trainer] Initialized.")
         
 
 
         # [NEW] Create the "shopping cart" (RolloutBuffer)
-        # We get the specs from the environment
-        obs_shape = self.env.observation_space.shape
-
-        if isinstance(self.env.action_space,gym.spaces.Discrete):
-
-            action_dim = self.env.action_space.n # if it discreet how many button does it have
-        else:
-            raise NotImplementedError("Only Discrete action spaces are supported for now.")
         
         ## [REMOVED] The buffer is now owned by the agent: self.buffer = RolloutBuffer(self.n_steps,obs_shape,action_dim)
 
