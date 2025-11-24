@@ -1,9 +1,7 @@
 
------
+# rlx: The "LangChain for Reinforcement Learning" (Alpha v0.3.0)
 
-# rlx: The "LangChain for Reinforcement Learning" (Alpha v0.2.0)
-
-Hey everyone, Bereket here. Thanks for checking in on the progress.
+Hey everyone, Bereket here.
 
 This is a project I'm building out of a desire for better tooling. As I've been learning AI and Reinforcement Learning, I realized that existing libraries (like `stable-baselines3`) are incredible, but they often feel like "black boxes." They are great for getting results, but hard to "tinker" with or hack.
 
@@ -23,96 +21,78 @@ We are moving from hard-coded scripts to declarative pipelines:
 from rlx.agents import PPOAgent
 from rlx.train import Train
 from rlx.env import EnvManager
+from rlx.networks.vision import NatureCNN
 
-# 1. Create the Environment (Discrete OR Continuous!)
-env = EnvManager("Pendulum-v1")
+# 1. Create a Vision Environment
+env = EnvManager("CarRacing-v3")
 
-# 2. Create the Agent (Auto-detects the right "Brain" for the job)
-# You can plug in your own Policy here, or let rlx build a default one.
-agent = PPOAgent(env=env, lr=3e-4)
+# 2. Plug in a Vision Brain (The "LEGO" moment)
+# We swap the default brain for a CNN just by passing an object.
+cnn_policy = NatureCNN(input_channels=3, action_dim=env.action_space.shape[0])
+agent = PPOAgent(env=env, policy=cnn_policy)
 
-# 3. Train with a built-in dashboard
+# 3. Train
 trainer = Train(agent, env)
-trainer.run(total_timesteps=100_000)
+trainer.run(total_timesteps=1_000_000)
 ```
 
 -----
 
-## 🚀 Major Update: We Are Live\! (v0.2.0)
+## 🚀 Major Update: Vision Support\! (v0.3.0)
 
-Since the last update, we have moved from "laying the foundation" to a **fully functional, multi-purpose library.**
+We have successfully built the "Holy Trinity" of RL inputs. The library now supports:
 
-We hit three massive milestones this week:
+1.  **✅ Discrete Control:** (e.g., `CartPole-v1`) - Pressing buttons.
+2.  **✅ Continuous Control:** (e.g., `Pendulum-v1`) - Turning knobs and steering wheels.
+3.  **✅ Visual Control:** (e.g., `CarRacing-v3`) - Learning from raw pixels using CNNs.
 
-### 1\. The Engine Works (CartPole Solved) 📊
+### The "Universal Adaptor" 🤖
 
-We successfully implemented the **PPO `learn()` loop**.
+The `PPOAgent` is now smart.
 
-  * We calculated GAE (Generalized Advantage Estimation).
-  * We implemented the clipped surrogate loss.
-  * **Result:** The agent solves `CartPole-v1` in under 50k steps, taking rewards from \~20 to \>300.
-
-### 2\. The "Dashboard" is Live 🖥️
-
-We got tired of staring at a blank screen while training. The `Trainer` now includes a real-time CLI dashboard that tracks:
-
-  * Mean Reward (Last 10 episodes)
-  * Actor Loss & Value Loss
-  * Current Step Count
-
-### 3\. The "Universal Adaptor" (Discrete & Continuous) 🤖
-
-This is the biggest technical leap. Originally, `rlx` only supported "Discrete" actions (pressing buttons, like in Mario).
-
-We just refactored the entire stack to support **Continuous** actions (turning knobs/steering wheels, like in Robotics).
-
-  * **Discrete Mode:** The agent builds a "Categorical" Brain (Bar Chart probability).
-  * **Continuous Mode:** The agent builds a "Normal" Brain (Gaussian Bell Curve).
-  * **The Magic:** You don't have to do anything. `PPOAgent` automatically looks at your environment and builds the correct brain for you.
+  * If you pass a **Discrete** environment, it builds a categorical (Softmax) brain.
+  * If you pass a **Continuous** environment, it builds a Gaussian (Normal Distribution) brain.
+  * If you pass a **Custom Policy** (like our new `NatureCNN`), it just works.
 
 -----
 
-## 🧱 The "LEGO Bricks" (Current Architecture)
+## 🧱 The Architecture
 
 Here is how the system is currently built:
 
-  * **✅ `EnvManager`:** Wraps Gymnasium environments and standardizes the inputs.
-  * **✅ `BaseAgent`:** The abstract contract for all agents.
-  * **✅ `PPOAgent`:** The "Surgeon."
-      * It manages the learning loop.
-      * It now features **Plug-and-Play Architecture**: You can pass a custom neural network into `__init__`, and the agent will use it.
-  * **✅ `RolloutBuffer`:** The "Memory."
-      * Updated to handle both Scalar actions (buttons) and Vector actions (steering/gas/brake).
-  * **✅ `networks/core.py` (NEW):** The "Brains."
-      * `ActorCritic`: For Discrete spaces.
-      * `ContinuousActorCritic`: For Continuous spaces (using `torch.distributions.Normal`).
-  * **✅ `Trainer`:** The "Driver." Now includes logging and safety checks.
+  * **`rlx/agents/ppo.py`:** The "Surgeon." Manages the learning loop and handles the "Plug-and-Play" brain logic.
+  * **`rlx/env/manager.py`:** Wraps Gymnasium environments and standardizes inputs.
+  * **`rlx/train/trainer.py`:** The "Driver." Includes a real-time CLI dashboard for tracking rewards and losses.
+  * **`rlx/networks/`**:
+      * **`core.py`:** Standard MLP brains for Discrete & Continuous tasks.
+      * **`vision.py`:** [NEW] The **NatureCNN** architecture for processing images.
+  * **`rlx/utils/buffer.py`:** The "Memory." Handles both scalar (button) and vector (steering) storage.
 
 -----
 
 ## 📂 Project Structure
 
-We've cleaned up the architecture significantly to separate "The Agent" from "The Brain."
-
-```
+```text
 rlx/
 ├── rlx/
 │   ├── __init__.py
 │   ├── agents/
-│   │   ├── base_agent.py      # The Abstract Contract
-│   │   └── ppo.py             # The Logic (The "Surgeon")
+│   │   ├── base_agent.py
+│   │   └── ppo.py             # Core Algorithm
 │   ├── env/
-│   │   └── manager.py         # The Gym Wrapper
-│   ├── networks/              # [NEW] Where the Neural Nets live
+│   │   └── manager.py         # Gym Wrapper
+│   ├── networks/              
 │   │   ├── __init__.py
-│   │   └── core.py            # Discrete & Continuous Actor-Critics
+│   │   ├── core.py            # MLP Brains
+│   │   └── vision.py          # CNN Eyes (The new update)
 │   ├── train/
-│   │   └── trainer.py         # The Loop & Dashboard
+│   │   └── trainer.py         # Dashboard & Loop
 │   ├── utils/
-│   │   └── buffer.py          # The Memory (Vectors & Scalars)
+│   │   └── buffer.py          # Memory
 ├── examples/
-│   ├── train_cartpole.py      # Test for Discrete (Buttons)
-│   └── train_pendulum.py      # Test for Continuous (Steering)
+│   ├── train_cartpole.py      # Demo: Discrete
+│   ├── train_pendulum.py      # Demo: Continuous
+│   └── train_carracing.py     # Demo: Vision
 ├── README.md
 └── pyproject.toml
 ```
@@ -121,12 +101,14 @@ rlx/
 
 ## 🔮 What's Next?
 
-We have the engine (PPO) and the steering wheel (Continuous Support). The next step is **The Eyes.**
+Now that the core engine works for all data types, the next phase is **Persistence & usability.**
 
-I am currently working on implementing **CNN (Convolutional Neural Network)** support so we can plug a "Vision Brain" into the PPO Agent.
-
-The goal? **To train a self-driving car in `CarRacing-v2` using raw pixels.**
+  * **Saving/Loading Models:** We need to save the "Self-Driving Car" brain so we can watch it drive later\!
+  * **Evaluation Mode:** A script to watch the agent play without training.
 
 Stay tuned.
 
 — Bereket
+
+-----
+
