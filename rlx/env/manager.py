@@ -21,7 +21,7 @@ class EnvManager:
     
     It solves the problem of "how does the Trainer talk to the env?"
     """
-    def __init__(self,env_id: str,seed: Optional[int]=None, num_envs: int=1):
+    def __init__(self,env_id: str,seed: Optional[int]=None, num_envs: int=1,render_mode: str =None):
         """
         Initializes the environment manager.
         
@@ -66,9 +66,9 @@ class EnvManager:
         new_obs, reward, done, _, info = self.env.step(action)
         ---
         """
-        obs,reward,terminated,trancated,info = self.env.step(action)
+        obs,reward,terminated,truncated,info = self.env.step(action)
         self._latest_obs = obs
-        return obs,reward,terminated,trancated,info
+        return obs,reward,terminated,truncated,info
 
     def reset(self)->Tuple[Observation,dict]:
         """

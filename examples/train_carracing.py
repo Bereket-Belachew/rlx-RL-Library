@@ -41,7 +41,7 @@ def main():
     trainer = Train(agent=agent, env=env)
     
     # Run for just a few steps to prove it doesn't crash
-    trainer.run(total_time_steps=10_000)
+    trainer.run(total_time_steps=10_000,save_path="my_fast_car.pth")
 
 if __name__ == "__main__":
     main()

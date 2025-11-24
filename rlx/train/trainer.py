@@ -31,7 +31,7 @@ class Train:
         
         ## [REMOVED] The buffer is now owned by the agent: self.buffer = RolloutBuffer(self.n_steps,obs_shape,action_dim)
 
-    def run(self,total_time_steps:int):
+    def run(self,total_time_steps:int,save_path: str = None):
 
         """
         [Dev Note]: User use this function as:
@@ -105,6 +105,10 @@ class Train:
                 current_episode_reward= 0.0
                 obs,info = self.env.reset()
         print("✅ [Trainer] Training complete.")
+
+        if save_path is not None:
+            self.agent.save(save_path)
+
         self.env.close()
 
 

@@ -81,8 +81,17 @@ class PPOAgent(BaseAgent):
       
       
    def select_action(self, observation: Observation) -> Tuple[Action, any]:
+         # [FIX] Force conversion to numpy array first. 
+         # This handles cases where observation is a list like [array]
+         if not isinstance(observation, np.ndarray):
+             observation = np.array(observation)
          # 1. Convert data: numpy -> torch.Tensor
-         obs_tensor = torch.tensor(observation, dtype=torch.float32).unsqueeze(0)
+         obs_tensor = torch.tensor(observation, dtype=torch.float32)
+
+         if obs_tensor.dim()==3:#for image
+             obs_tensor=obs_tensor.unsqueeze(0)
+         elif obs_tensor.dim()==1: #for vector
+             obs_tensor=obs_tensor.unsqueeze(0)
          
          # Put network in eval mode
          self.ac_network.eval()
@@ -117,12 +126,22 @@ class PPOAgent(BaseAgent):
       
 
    def save(self, path: str) -> None:
-         torch.save(self.ac_network.state_dict(), path)
-         print(f"✅ [PPOAgent] Model saved to {path}")  
+        """Saves the agent's brain (weights) to a file."""
+        print(f"💾 [PPOAgent] Saving model to {path}...")
+        torch.save({
+            'model_state_dict':self.ac_network.state_dict(),
+            'optimizer_state_dict':self.optimizer.state_dict(),
+
+        },path)
+        print("✅ Save complete.")  
 
    def load(self, path: str) -> None:
-        self.ac_network.load_state_dict(torch.load(path))
-        print(f"✅ [PPOAgent] Model loaded from {path}")
+        """Loads a saved brain from a file."""
+        print(f"📂 [PPOAgent] Loading model from {path}...")
+        checkpoint = torch.load(path)
+        self.ac_network.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print("✅ Load complete. Agent is ready.")
       
    def learn(self, batch: dict[str, torch.Tensor]) -> dict:
         
